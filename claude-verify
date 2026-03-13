@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MANIFEST_BASE_URL="https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases"
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Verify the checksum of a Claude Code binary against the official release manifest.
+
+Options:
+  -p, --path PATH     Path to the claude binary (default: \$(which claude))
+  -o, --os PLATFORM   Override platform key (e.g. darwin-arm64, linux-x64, linux-x64-musl)
+  -h, --help          Show this help message
+
+Available platforms:
+  darwin-arm64, darwin-x64
+  linux-arm64, linux-x64
+  linux-arm64-musl, linux-x64-musl
+  win32-arm64, win32-x64
+EOF
+}
+
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+# ── argument parsing ──────────────────────────────────────────────────────────
+
+BINARY_PATH=""
+PLATFORM_OVERRIDE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -p|--path)
+      [[ $# -lt 2 ]] && die "--path requires an argument"
+      BINARY_PATH="$2"; shift 2 ;;
+    --path=*)
+      BINARY_PATH="${1#*=}"; shift ;;
+    -o|--os)
+      [[ $# -lt 2 ]] && die "--os requires an argument"
+      PLATFORM_OVERRIDE="$2"; shift 2 ;;
+    --os=*)
+      PLATFORM_OVERRIDE="${1#*=}"; shift ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *)
+      die "unknown option: $1" ;;
+  esac
+done
+
+# ── resolve binary path ───────────────────────────────────────────────────────
+
+if [[ -z "$BINARY_PATH" ]]; then
+  BINARY_PATH="$(command -v claude 2>/dev/null)" \
+    || die "claude not found in PATH; use --path to specify the binary"
+fi
+
+[[ -f "$BINARY_PATH" ]] || die "file not found: $BINARY_PATH"
+[[ -r "$BINARY_PATH" ]] || die "file not readable: $BINARY_PATH"
+
+echo "Binary:  $BINARY_PATH"
+
+# ── detect version ────────────────────────────────────────────────────────────
+
+RAW_VERSION="$("$BINARY_PATH" --version 2>/dev/null)" \
+  || die "could not run '$BINARY_PATH --version'"
+
+VERSION="$(echo "$RAW_VERSION" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')" \
+  || die "could not parse version from: $RAW_VERSION"
+
+echo "Version: $VERSION"
+
+# ── detect platform ───────────────────────────────────────────────────────────
+
+if [[ -n "$PLATFORM_OVERRIDE" ]]; then
+  PLATFORM="$PLATFORM_OVERRIDE"
+else
+  OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  ARCH="$(uname -m)"
+
+  case "$ARCH" in
+    x86_64)  ARCH="x64" ;;
+    aarch64|arm64) ARCH="arm64" ;;
+    *) die "unsupported architecture: $ARCH" ;;
+  esac
+
+  case "$OS" in
+    darwin) PLATFORM="${OS}-${ARCH}" ;;
+    linux)
+      # detect musl vs glibc
+      MUSL_SUFFIX=""
+      if ldd --version 2>&1 | grep -qi musl; then
+        MUSL_SUFFIX="-musl"
+      elif [[ -n "$(find /lib /usr/lib -maxdepth 1 -name 'libc.musl-*' 2>/dev/null | head -1)" ]]; then
+        MUSL_SUFFIX="-musl"
+      fi
+      PLATFORM="${OS}-${ARCH}${MUSL_SUFFIX}"
+      ;;
+    *) die "unsupported OS: $OS" ;;
+  esac
+fi
+
+echo "Platform: $PLATFORM"
+
+# ── fetch manifest ────────────────────────────────────────────────────────────
+
+MANIFEST_URL="${MANIFEST_BASE_URL}/${VERSION}/manifest.json"
+echo "Manifest: $MANIFEST_URL"
+echo ""
+
+if command -v curl &>/dev/null; then
+  MANIFEST="$(curl -fsSL "$MANIFEST_URL")" \
+    || die "failed to fetch manifest from $MANIFEST_URL"
+elif command -v wget &>/dev/null; then
+  MANIFEST="$(wget -qO- "$MANIFEST_URL")" \
+    || die "failed to fetch manifest from $MANIFEST_URL"
+else
+  die "curl or wget is required to fetch the manifest"
+fi
+
+# ── extract expected checksum ─────────────────────────────────────────────────
+
+if command -v jq &>/dev/null; then
+  EXPECTED="$(echo "$MANIFEST" | jq -r --arg p "$PLATFORM" '.platforms[$p].checksum // empty')"
+elif command -v python3 &>/dev/null; then
+  EXPECTED="$(echo "$MANIFEST" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+p = '$PLATFORM'
+entry = data.get('platforms', {}).get(p)
+if entry:
+    print(entry['checksum'])
+")"
+else
+  die "jq or python3 is required to parse the manifest"
+fi
+
+[[ -n "$EXPECTED" ]] \
+  || die "platform '$PLATFORM' not found in manifest for version $VERSION"
+
+# ── compute actual checksum ───────────────────────────────────────────────────
+
+if command -v sha256sum &>/dev/null; then
+  ACTUAL="$(sha256sum "$BINARY_PATH" | awk '{print $1}')"
+elif command -v shasum &>/dev/null; then
+  ACTUAL="$(shasum -a 256 "$BINARY_PATH" | awk '{print $1}')"
+else
+  die "sha256sum or shasum is required to compute the checksum"
+fi
+
+# ── compare ───────────────────────────────────────────────────────────────────
+
+echo "Expected: $EXPECTED"
+echo "Actual:   $ACTUAL"
+echo ""
+
+if [[ "$ACTUAL" == "$EXPECTED" ]]; then
+  echo "OK  Checksum verified successfully."
+else
+  echo "FAIL  Checksum mismatch! The binary may be corrupted or tampered with." >&2
+  exit 1
+fi
