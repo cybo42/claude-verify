@@ -12,6 +12,7 @@ Verify the checksum of a Claude Code binary against the official release manifes
 Options:
   -p, --path PATH     Path to the claude binary (default: \$(which claude))
   -o, --os PLATFORM   Override platform key (e.g. darwin-arm64, linux-x64, linux-x64-musl)
+  -s, --silent        Suppress all output on success; errors still go to stderr
   -h, --help          Show this help message
 
 Available platforms:
@@ -31,6 +32,7 @@ die() {
 
 BINARY_PATH=""
 PLATFORM_OVERRIDE=""
+SILENT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -44,12 +46,16 @@ while [[ $# -gt 0 ]]; do
       PLATFORM_OVERRIDE="$2"; shift 2 ;;
     --os=*)
       PLATFORM_OVERRIDE="${1#*=}"; shift ;;
+    -s|--silent)
+      SILENT=1; shift ;;
     -h|--help)
       usage; exit 0 ;;
     *)
       die "unknown option: $1" ;;
   esac
 done
+
+log() { [[ $SILENT -eq 0 ]] && echo "$*" || true; }
 
 # ── resolve binary path ───────────────────────────────────────────────────────
 
@@ -61,7 +67,7 @@ fi
 [[ -f "$BINARY_PATH" ]] || die "file not found: $BINARY_PATH"
 [[ -r "$BINARY_PATH" ]] || die "file not readable: $BINARY_PATH"
 
-echo "Binary:  $BINARY_PATH"
+log "Binary:  $BINARY_PATH"
 
 # ── detect version ────────────────────────────────────────────────────────────
 
@@ -71,7 +77,7 @@ RAW_VERSION="$("$BINARY_PATH" --version 2>/dev/null)" \
 VERSION="$(echo "$RAW_VERSION" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')" \
   || die "could not parse version from: $RAW_VERSION"
 
-echo "Version: $VERSION"
+log "Version: $VERSION"
 
 # ── detect platform ───────────────────────────────────────────────────────────
 
@@ -103,13 +109,13 @@ else
   esac
 fi
 
-echo "Platform: $PLATFORM"
+log "Platform: $PLATFORM"
 
 # ── fetch manifest ────────────────────────────────────────────────────────────
 
 MANIFEST_URL="${MANIFEST_BASE_URL}/${VERSION}/manifest.json"
-echo "Manifest: $MANIFEST_URL"
-echo ""
+log "Manifest: $MANIFEST_URL"
+log ""
 
 if command -v curl &>/dev/null; then
   MANIFEST="$(curl -fsSL "$MANIFEST_URL")" \
@@ -153,13 +159,13 @@ fi
 
 # ── compare ───────────────────────────────────────────────────────────────────
 
-echo "Expected: $EXPECTED"
-echo "Actual:   $ACTUAL"
-echo ""
+log "Expected: $EXPECTED"
+log "Actual:   $ACTUAL"
+log ""
 
 if [[ "$ACTUAL" == "$EXPECTED" ]]; then
-  echo "OK  Checksum verified successfully."
+  log "OK  Checksum verified successfully."
 else
-  echo "FAIL  Checksum mismatch! The binary may be corrupted or tampered with." >&2
+  echo "error: checksum mismatch — the binary may be corrupted or tampered with" >&2
   exit 1
 fi

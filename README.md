@@ -42,8 +42,11 @@ cd claude-verify
 # Override platform detection (useful in containers or cross-checks)
 ./claude-verify --os linux-x64-musl
 
+# Silent mode — no output on success, useful for scripts and CI
+./claude-verify --silent
+
 # Combine options
-./claude-verify --path ./claude --os darwin-arm64
+./claude-verify --path ./claude --os darwin-arm64 --silent
 ```
 
 ### Options
@@ -52,6 +55,7 @@ cd claude-verify
 |---|---|---|
 | `--path PATH` | `-p` | Path to the binary to verify (default: `which claude`) |
 | `--os PLATFORM` | `-o` | Override platform key instead of auto-detecting |
+| `--silent` | `-s` | Suppress all output on success; errors still go to stderr |
 | `--help` | `-h` | Show usage information |
 
 ### Supported platforms
@@ -74,7 +78,7 @@ Actual:   182c20c6080d042e4e08a6b2a2ce8258c1a50e53c01d36ddf20a82b4693395ea
 OK  Checksum verified successfully.
 ```
 
-A checksum mismatch prints `FAIL` to stderr and exits with code `1`.
+A checksum mismatch prints an error to stderr and exits with code `1`. In silent mode (`-s`), all normal output is suppressed — only errors are printed.
 
 ## How it works
 
