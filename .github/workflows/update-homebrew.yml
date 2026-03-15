@@ -1,0 +1,111 @@
+name: Update Homebrew formula
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-formula:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute SHA256 of GitHub tarball
+        id: sha
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          TARBALL_URL="https://github.com/cybo42/claude-verify/archive/refs/tags/${TAG}.tar.gz"
+
+          for attempt in $(seq 1 18); do
+            HTTP_STATUS=$(curl -sLo /dev/null -w "%{http_code}" "${TARBALL_URL}")
+            if [ "${HTTP_STATUS}" = "200" ]; then
+              break
+            fi
+            echo "Attempt ${attempt}: tarball not ready (HTTP ${HTTP_STATUS}), retrying in 5 s..."
+            sleep 5
+          done
+
+          if [ "${HTTP_STATUS}" != "200" ]; then
+            echo "error: tarball at ${TARBALL_URL} never became available (last HTTP ${HTTP_STATUS})" >&2
+            exit 1
+          fi
+
+          SHA256=$(curl -sL "${TARBALL_URL}" | sha256sum | awk '{print $1}')
+          echo "sha256=${SHA256}" >> "${GITHUB_OUTPUT}"
+          echo "tarball_url=${TARBALL_URL}" >> "${GITHUB_OUTPUT}"
+
+      - name: Clone homebrew tap
+        env:
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          git clone \
+            "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/cybo42/homebrew-prv-tap.git" \
+            tap
+
+      - name: Update formula
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          SHA256: ${{ steps.sha.outputs.sha256 }}
+          TARBALL_URL: ${{ steps.sha.outputs.tarball_url }}
+        run: |
+          VERSION="${TAG#v}"
+          FORMULA="tap/Formula/claude-verify.rb"
+
+          python3 - "${FORMULA}" "${VERSION}" "${TARBALL_URL}" "${SHA256}" <<'PYEOF'
+          import sys, re
+
+          formula_path, version, url, sha256 = sys.argv[1:]
+
+          with open(formula_path, 'r') as fh:
+              content = fh.read()
+
+          content = re.sub(
+              r'(^\s*url\s+")[^"]*(")',
+              lambda m: m.group(1) + url + m.group(2),
+              content, flags=re.MULTILINE
+          )
+          content = re.sub(
+              r'(^\s*sha256\s+")[^"]*(")',
+              lambda m: m.group(1) + sha256 + m.group(2),
+              content, flags=re.MULTILINE
+          )
+          content = re.sub(
+              r'(^\s*version\s+")[^"]*(")',
+              lambda m: m.group(1) + version + m.group(2),
+              content, flags=re.MULTILINE
+          )
+
+          with open(formula_path, 'w') as fh:
+              fh.write(content)
+
+          print(f"Updated formula: version={version}, sha256={sha256}")
+          PYEOF
+
+      - name: Create branch, commit, and push
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION="${TAG#v}"
+          BRANCH="claude-verify-${VERSION}"
+
+          cd tap
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${BRANCH}"
+          git add Formula/claude-verify.rb
+          git commit -m "claude-verify ${VERSION}"
+          git push origin "${BRANCH}"
+
+      - name: Open PR against homebrew-prv-tap
+        env:
+          GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION="${TAG#v}"
+          BRANCH="claude-verify-${VERSION}"
+
+          gh pr create \
+            --repo cybo42/homebrew-prv-tap \
+            --head "${BRANCH}" \
+            --base main \
+            --title "claude-verify ${VERSION}" \
+            --body "Automated formula bump for [claude-verify ${TAG}](https://github.com/cybo42/claude-verify/releases/tag/${TAG})."
